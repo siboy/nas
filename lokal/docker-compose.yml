@@ -1,0 +1,103 @@
+# ==============================================================================
+# Lokal (Laptop Rumah) — Docker Compose
+# ==============================================================================
+# Service yang berjalan di laptop:
+# - filebrowser: Web UI untuk akses HDD external (Skenario 4 — akses dari luar)
+# - syncthing  : Sync 2-arah Contabo <-> HDD lokal (kalau perlu sync real-time)
+# - cloudflared: Expose FileBrowser ke publik via Cloudflare Tunnel (opsional)
+#
+# HDD external di-mount via volume binding: ${HDD_MOUNT}:/data
+# Pastikan di .env: HDD_MOUNT=E:/nas-archive (Windows) atau /mnt/nas (Linux)
+# ==============================================================================
+
+services:
+  # ==========================================================================
+  # FileBrowser — UI web untuk browse/upload/download HDD lokal
+  # Skenario 4: user luar bisa upload langsung ke HDD via Cloudflare Tunnel
+  # ==========================================================================
+  filebrowser:
+    image: filebrowser/filebrowser:latest
+    container_name: nas-filebrowser
+    restart: unless-stopped
+    ports:
+      - "${FILEBROWSER_PORT:-8080}:80"
+    volumes:
+      # Mount HDD external sebagai /srv (root data folder FileBrowser)
+      - "${HDD_MOUNT}:/srv"
+      # Config & database FileBrowser (user, settings)
+      - ./filebrowser/database.db:/database.db
+      - ./filebrowser/filebrowser.json:/.filebrowser.json
+    environment:
+      - FB_DATABASE=/database.db
+      - FB_ROOT=/srv
+      - FB_LOG=stdout
+    networks:
+      - nas-net
+
+  # ==========================================================================
+  # Syncthing — Sync 2-arah file antar device (opsional, kalau mau sync HP juga)
+  # Bisa juga dipakai sebagai alternatif Nextcloud Desktop client
+  # ==========================================================================
+  syncthing:
+    image: syncthing/syncthing:latest
+    container_name: nas-syncthing
+    restart: unless-stopped
+    hostname: nas-laptop
+    user: "1000:1000"
+    ports:
+      - "${SYNCTHING_UI_PORT:-8384}:8384"   # Web UI
+      - "22000:22000/tcp"                    # Transfer (TCP)
+      - "22000:22000/udp"                    # Transfer (QUIC)
+      - "21027:21027/udp"                    # Local discovery
+    volumes:
+      - ./syncthing/config:/var/syncthing/config
+      - "${HDD_MOUNT}:/var/syncthing/data"
+    environment:
+      - PUID=1000
+      - PGID=1000
+    networks:
+      - nas-net
+
+  # ==========================================================================
+  # Cloudflared — Tunnel ke Cloudflare untuk expose FileBrowser ke publik
+  # Akses: https://files.yourdomain.com (atau subdomain yang di-set)
+  # ==========================================================================
+  # Uncomment + isi CLOUDFLARE_TUNNEL_TOKEN di .env untuk aktifkan
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: nas-cloudflared
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+  #   networks:
+  #     - nas-net
+  #   depends_on:
+  #     - filebrowser
+
+  # ==========================================================================
+  # rclone (sebagai container untuk scheduled archive)
+  # Bisa dipakai untuk auto-pull dari Contabo via cron di dalam container
+  # ==========================================================================
+  # Uncomment kalau mau auto-pull tanpa Task Scheduler Windows
+  # rclone-archive:
+  #   image: rclone/rclone:latest
+  #   container_name: nas-rclone
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./rclone/config:/config/rclone
+  #     - "${HDD_MOUNT}:/data"
+  #     - ../ssh-keys:/ssh-keys:ro
+  #   entrypoint: /bin/sh
+  #   command: -c "while true; do echo 'rclone idle, waiting for trigger'; sleep 3600; done"
+  #   networks:
+  #     - nas-net
+
+networks:
+  nas-net:
+    name: nas-net
+    driver: bridge
+
+# CATATAN WINDOWS:
+# - Pastikan Docker Desktop --> Settings --> Resources --> File Sharing
+#   memasukkan drive HDD external (misal E:) supaya bisa di-mount ke container
+# - Disable USB Selective Suspend di Power Options agar HDD ga sleep
+# - Set laptop "Never sleep" saat AC plugged in (Power & battery settings)

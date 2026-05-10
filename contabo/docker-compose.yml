@@ -1,0 +1,153 @@
+# ==============================================================================
+# Contabo VPS — Docker Compose
+# ==============================================================================
+# Service di Contabo:
+# - postgres   : Database untuk Nextcloud (terpisah dari MySQL bisnis lain)
+# - redis      : Cache & file locking untuk Nextcloud
+# - nextcloud  : Aplikasi utama (file sync, share, foto)
+# - cron       : Background jobs Nextcloud (cleanup, indexing)
+# - cloudflared: Tunnel untuk akses publik via HTTPS
+#
+# CATATAN:
+# - MySQL eksisting di Contabo (mysql-8 di network ${NETWORK}) TIDAK di-reuse
+#   karena Nextcloud lebih cocok dengan PostgreSQL & isolasi DB lebih bersih
+# - Volume data Nextcloud di /var/lib/docker/volumes/ — pastikan folder ini
+#   ada di partisi dengan space cukup (cek df -h sebelum start)
+# ==============================================================================
+
+services:
+  # ==========================================================================
+  # PostgreSQL — Database Nextcloud
+  # ==========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: nas-postgres
+    restart: unless-stopped
+    volumes:
+      - nas_postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-nextcloud}
+      - POSTGRES_USER=${POSTGRES_USER:-nextcloud}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    networks:
+      - nas-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nextcloud}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================================
+  # Redis — Cache + file locking (penting untuk performa Nextcloud)
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: nas-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - nas_redis_data:/data
+    networks:
+      - nas-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ==========================================================================
+  # Nextcloud — Main app (Apache + PHP)
+  # ==========================================================================
+  nextcloud:
+    image: nextcloud:29-apache
+    container_name: nas-nextcloud
+    restart: unless-stopped
+    ports:
+      - "${NEXTCLOUD_PORT:-8080}:80"
+    volumes:
+      - nas_nextcloud_data:/var/www/html
+      # Custom config (kalau perlu override)
+      - ./nextcloud-config/custom.config.php:/var/www/html/config/custom.config.php:ro
+    environment:
+      # Database
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-nextcloud}
+      - POSTGRES_USER=${POSTGRES_USER:-nextcloud}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      # Redis
+      - REDIS_HOST=redis
+      - REDIS_HOST_PASSWORD=${REDIS_PASSWORD}
+      # Admin (dipakai sekali saat install pertama)
+      - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER:-admin}
+      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD}
+      # Trusted domains
+      - NEXTCLOUD_TRUSTED_DOMAINS=${NEXTCLOUD_TRUSTED_DOMAINS:-localhost}
+      # Behind proxy (Cloudflare Tunnel)
+      - TRUSTED_PROXIES=172.16.0.0/12 10.0.0.0/8
+      - OVERWRITEPROTOCOL=https
+      - OVERWRITECLIURL=https://${DOMAIN}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - nas-net
+
+  # ==========================================================================
+  # Nextcloud Cron — Run background jobs setiap 5 menit
+  # ==========================================================================
+  nextcloud-cron:
+    image: nextcloud:29-apache
+    container_name: nas-nextcloud-cron
+    restart: unless-stopped
+    volumes:
+      - nas_nextcloud_data:/var/www/html
+    entrypoint: /cron.sh
+    depends_on:
+      - nextcloud
+    networks:
+      - nas-net
+
+  # ==========================================================================
+  # Cloudflared — Expose Nextcloud ke domain publik via HTTPS
+  # ==========================================================================
+  # Setup tunnel di Cloudflare dashboard --> dapatkan token --> isi di .env
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: nas-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - nas-net
+    depends_on:
+      - nextcloud
+
+volumes:
+  nas_postgres_data:
+    name: nas_postgres_data
+  nas_redis_data:
+    name: nas_redis_data
+  nas_nextcloud_data:
+    name: nas_nextcloud_data
+
+networks:
+  nas-net:
+    name: nas-net
+    driver: bridge
+
+# ==============================================================================
+# CARA RESIZING/UPGRADE:
+# - Update image tag di service nextcloud (e.g. nextcloud:30-apache)
+# - Run: docker compose pull nextcloud && docker compose up -d nextcloud
+# - Database auto-migrate saat startup
+#
+# CARA AKSES INITIAL:
+# 1. http://VPS_IP:8080 --> setup wizard (atau pakai env NEXTCLOUD_ADMIN_*)
+# 2. Login admin --> Settings --> Apps --> install "Memories" untuk foto
+# 3. Tambah user untuk kolaborasi --> Settings --> Users
+#
+# TIPS:
+# - Setelah install, set OPcache & APCu di config untuk performa lebih baik
+# - Lihat docs/03-setup-contabo.md untuk detail tuning
+# ==============================================================================
