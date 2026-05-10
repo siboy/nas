@@ -54,6 +54,87 @@ make archive-now     # Workflow lengkap: prepare + pull + finalize
 make help
 ```
 
+## Transfer File ke NAS (dari Mac/Linux via SMB + Tailscale)
+
+Mac/Linux yang sudah join tailnet bisa mount folder NAS dan transfer file pakai `rsync` (built-in di macOS, no install). Skenario: offload file dari Mac yg storage-nya penuh ke folder NAS di PC.
+
+### Mount SMB share di Mac
+
+Finder → **Cmd+K** → masukkan:
+
+```
+smb://<TAILSCALE_IP_PC>/nas-archive
+```
+
+Username = Windows username PC, password = Windows password. Folder akan mount di `/Volumes/nas-archive`.
+
+### Verify mount + permission write
+
+```bash
+mount | grep nas-archive                                    # cek mount point
+touch /Volumes/nas-archive/test.txt && rm /Volumes/nas-archive/test.txt  # test write
+```
+
+### Transfer 1 file (sanity check)
+
+```bash
+cp ~/Desktop/file.jpg /Volumes/nas-archive/Photos/
+```
+
+### Bulk transfer pakai rsync
+
+```bash
+# Pattern dasar: -a (archive mode) -v (verbose) -h (human size) --progress
+rsync -avh --progress ~/Pictures/Foto2024/ /Volumes/nas-archive/Photos/2024/
+
+# CATATAN: trailing slash penting!
+#   ~/Pictures/Foto2024/   → copy ISI folder
+#   ~/Pictures/Foto2024    → copy folder ITU SENDIRI (extra nesting)
+```
+
+Real example (transfer multi-folder sekaligus):
+
+```bash
+# Bikin struktur dulu di NAS
+mkdir -p /Volumes/nas-archive/Foto/{2024,2025,2026}
+mkdir -p /Volumes/nas-archive/Documents/{Kerja,Pribadi}
+mkdir -p /Volumes/nas-archive/Video
+
+# Transfer per kategori
+rsync -avh --progress ~/Pictures/  /Volumes/nas-archive/Foto/
+rsync -avh --progress ~/Documents/ /Volumes/nas-archive/Documents/
+rsync -avh --progress ~/Movies/    /Volumes/nas-archive/Video/
+```
+
+### Verify sebelum hapus dari Mac (penting!)
+
+```bash
+# Bandingkan jumlah file & total size
+echo "Source files:" && find ~/Pictures -type f | wc -l
+echo "Dest files:"   && find /Volumes/nas-archive/Foto -type f | wc -l
+echo "Source size:"  && du -sh ~/Pictures
+echo "Dest size:"    && du -sh /Volumes/nas-archive/Foto
+```
+
+Kalau jumlah file & size **sama** → safe untuk hapus dari Mac.
+
+### Hapus dari Mac setelah verified
+
+```bash
+# HATI-HATI: rm tidak ke Trash, irreversible
+rm -rf ~/Pictures/Foto2024
+
+# SAFER: pakai Finder (Cmd+Delete) yang move ke Trash, bisa di-recover
+```
+
+### Tips & gotchas
+
+- **Tailscale stay ON** di PC & Mac selama transfer
+- **Jangan tutup PC** mid-transfer — set Power Settings → "Never sleep"
+- **Tailscale direct (P2P)** jauh lebih cepat dari DERP relay; cek dengan `tailscale ping <hostname>` (kalau ada `via direct` = bagus, `via DERP` = relay)
+- **rsync resume otomatis** kalau diulang dengan flag yang sama (skip file yg sudah identik)
+- Estimasi: 10GB ~3-5 menit (LAN direct), 50GB ~15-25 menit (LAN direct)
+
 ## Struktur Project
 
 ```
